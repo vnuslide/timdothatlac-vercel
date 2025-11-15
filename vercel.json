@@ -3,11 +3,5 @@
     "api/sync-lark-to-supabase.js": {
       "runtime": "nodejs18.x"
     }
-  },
-  "cron": [
-    {
-      "path": "/api/sync-lark-to-supabase",
-      "schedule": "*/1 * * * *"
-    }
-  ]
+  }
 }
