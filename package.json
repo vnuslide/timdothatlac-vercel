@@ -1,13 +1,11 @@
-
 {
-  "name": "timdo-sync-service",
+  "name": "timdo-vercel",
   "version": "1.0.0",
-  "private": true,
-  "description": "Đồng bộ Larkbase sang Supabase và Gist.",
+  "type": "module",
   "scripts": {
-    "start": "node api/sync-lark-to-supabase.js"
+    "dev": "node api/sync-lark-to-supabase.js"
   },
   "dependencies": {
-    "node-fetch": "^2.6.7" 
+    "@supabase/supabase-js": "^2.48.0"
   }
 }
