@@ -9,15 +9,33 @@ const LARK_TABLE_ID = process.env.LARK_TABLE_ID;
 
 function normalizeText(input) {
   if (!input) return "";
-  return input.toString().normalize("NFD").replace(/[̀-\u036f]/g, "").toLowerCase().trim();
+  return input
+    .toString()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+// Lấy phần tử đầu nếu là array, còn không thì trả về chính nó
+function pickFirst(value) {
+  if (Array.isArray(value)) {
+    return value.length > 0 ? value[0] : null;
+  }
+  if (value === undefined || value === null || value === "") return null;
+  return value;
 }
 
 async function getLarkToken() {
-  const res = await fetch("https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal", {
-    method: "POST",
-    headers: { "Content-Type": "application/json; charset=utf-8" },
-    body: JSON.stringify({ app_id: LARK_APP_ID, app_secret: LARK_APP_SECRET })
-  });
+  const res = await fetch(
+    "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify({ app_id: LARK_APP_ID, app_secret: LARK_APP_SECRET }),
+    }
+  );
+
   const data = await res.json();
   if (data.code !== 0) throw new Error("Lark auth error: " + data.msg);
   return data.tenant_access_token;
@@ -26,61 +44,82 @@ async function getLarkToken() {
 async function fetchApprovedRecordsFromLark(token) {
   const items = [];
   let pageToken = "";
+
   do {
     const params = new URLSearchParams();
-    params.set("filter", 'CurrentValue.[TrangThai] = "Đã duyệt"');
+    params.set('filter', 'CurrentValue.[TrangThai] = "Đã duyệt"');
     params.set("page_size", "500");
     if (pageToken) params.set("page_token", pageToken);
 
     const url = `https://open.larksuite.com/open-apis/bitable/v1/apps/${LARK_APP_TOKEN}/tables/${LARK_TABLE_ID}/records?${params.toString()}`;
 
-    const res = await fetch(url, { method: "GET", headers: { Authorization: `Bearer ${token}` } });
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}` },
+    });
     const data = await res.json();
     if (data.code !== 0) throw new Error("Lark fetch error: " + data.msg);
 
     items.push(...(data.data.items || []));
     pageToken = data.data.has_more ? data.data.page_token : "";
   } while (pageToken);
+
   return items;
 }
 
 function mapRecordToSupabaseRow(rec) {
   const f = rec.fields || {};
-  const title = f.TieuDe || "";
-  const loaiTin = f.LoaiTin || "";
+
+  const title = pickFirst(f.TieuDe) || "";
+  const loaiTinRaw = pickFirst(f.LoaiTin) || "";
 
   let type = null;
-  if (loaiTin === "Nhặt được") type = "found";
-  else if (loaiTin === "Mất đồ") type = "lost";
-  else type = loaiTin || null;
+  if (loaiTinRaw === "Nhặt được") type = "found";
+  else if (loaiTinRaw === "Mất đồ") type = "lost";
+  else type = loaiTinRaw || null;
 
   let timeRaw = null;
-  if (f.ThoiGian) {
-    const t = Date.parse(f.ThoiGian);
+  const timeText = pickFirst(f.ThoiGian);
+  if (timeText) {
+    const t = Date.parse(timeText);
     if (!Number.isNaN(t)) timeRaw = t;
   }
 
-  const lat = f.Latitude ? parseFloat(f.Latitude) : null;
-  const lng = f.Longitude ? parseFloat(f.Longitude) : null;
+  // Multi-select / text fields
+  const groupRaw = pickFirst(f.Group);
+  const docTypeRaw = pickFirst(f.LoaiDo);
+  const khuVucRaw = pickFirst(f.KhuVuc);
+
+  // Tọa độ
+  let lat = null;
+  let lng = null;
+  if (f.Latitude !== undefined && f.Latitude !== null && f.Latitude !== "") {
+    const v = Number(f.Latitude);
+    if (!Number.isNaN(v)) lat = v;
+  }
+  if (f.Longitude !== undefined && f.Longitude !== null && f.Longitude !== "") {
+    const v = Number(f.Longitude);
+    if (!Number.isNaN(v)) lng = v;
+  }
 
   return {
     record_id: rec.record_id,
     name: title || null,
-    description: f.MoTa || null,
-    image: f.HinhAnhURL || null,
+    description: pickFirst(f.MoTa) || null,
+    image: pickFirst(f.HinhAnhURL) || null, // ảnh từ Lark
     type,
-    group: f.Group || null,
-    docType: f.LoaiDo || null,
-    khuVuc: f.KhuVuc || null,
-    time: f.ThoiGian || null,
+    group: groupRaw || null,
+    docType: docTypeRaw || null,
+    khuVuc: khuVucRaw || null,
+    time: timeText || null,
     timeRaw,
     isPinned: !!f.Ghim,
     latitude: lat,
     longitude: lng,
     _name: normalizeText(title),
-    _group: normalizeText(f.Group),
-    _docType: normalizeText(f.LoaiDo),
-    _khuVuc: normalizeText(f.KhuVuc)
+    _group: normalizeText(groupRaw),
+    _docType: normalizeText(docTypeRaw),
+    _khuVuc: normalizeText(khuVucRaw),
   };
 }
 
@@ -92,20 +131,30 @@ export default async function handler(req, res) {
     const items = await fetchApprovedRecordsFromLark(token);
     const rows = items.map(mapRecordToSupabaseRow);
 
-    const larkIdSet = new Set(rows.map(r => r.record_id));
+    const larkIdSet = new Set(rows.map((r) => r.record_id));
 
-    const { data: existing } = await supabase.from("TimDoSinhVien").select("record_id");
-    const idsToDelete = existing?.filter(e => !larkIdSet.has(e.record_id)).map(e => e.record_id) || [];
+    // 👉 Sync sang bảng cũ public_posts
+    const { data: existing } = await supabase
+      .from("public_posts")
+      .select("record_id");
+
+    const idsToDelete =
+      existing?.filter((e) => !larkIdSet.has(e.record_id)).map((e) => e.record_id) ||
+      [];
 
     if (idsToDelete.length > 0) {
-      await supabase.from("TimDoSinhVien").delete().in("record_id", idsToDelete);
+      await supabase.from("public_posts").delete().in("record_id", idsToDelete);
     }
 
     if (rows.length > 0) {
-      await supabase.from("TimDoSinhVien").upsert(rows, { onConflict: "record_id" });
+      await supabase
+        .from("public_posts")
+        .upsert(rows, { onConflict: "record_id" });
     }
 
-    return res.status(200).json({ success: true, synced: rows.length, deleted: idsToDelete.length });
+    return res
+      .status(200)
+      .json({ success: true, synced: rows.length, deleted: idsToDelete.length });
   } catch (err) {
     return res.status(500).json({ success: false, error: String(err) });
   }
