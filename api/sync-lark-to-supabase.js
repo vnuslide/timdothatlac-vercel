@@ -11,11 +11,12 @@ const CFG = {
     TABLE_ID: process.env.LARK_TABLE_ID,
     HOST: 'https://open.larksuite.com',
     
-    GITHUB_TOKEN: process.env.GITHUB_TOKEN,
-    GIST_ID: process.env.GIST_ID,
-    GIST_FILENAME: process.env.GIST_FILENAME,
-    TZ: 'Asia/Ho_Chi_Minh', 
+    // (XÓA GIST) Chúng ta không cần Gist nữa nếu Trang Bản Đồ cũng đọc từ Supabase
+    // GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+    // GIST_ID: process.env.GIST_ID,
+    // GIST_FILENAME: process.env.GIST_FILENAME,
     
+    TZ: 'Asia/Ho_Chi_Minh', 
     SUPABASE_URL: process.env.SUPABASE_URL,
     SUPABASE_KEY: process.env.SUPABASE_SERVICE_KEY,
     SUPABASE_TABLE: 'TimDoSinhVien' // Tên bảng của bạn
@@ -140,15 +141,13 @@ function publicRecordForSupabase_(rec) {
     _group: normalizeText_(group),
     _docType: normalizeText_(docType),
     _khuVuc: normalizeText_(khuVuc),
+    // (MỚI) Thêm các cột bị thiếu (nếu bạn đã thêm chúng)
     status: f.TrangThai || 'Chờ duyệt',
     email: f.EmailNguoiDang || null,
     lienHe: f.LienHe || null,
     linkFacebook: f.LinkFacebook || null
   };
 }
-
-// (Hàm Gist recordToPublic_ - Giữ nguyên logic cũ nếu bạn cần)
-// ...
 
 /* ------------------ (NODE.JS) HÀM GỌI API BÊN NGOÀI ------------------- */
 async function supabaseFetch(endpoint, options) {
@@ -162,9 +161,6 @@ async function supabaseFetch(endpoint, options) {
     const res = await fetch(url, { ...options, headers });
     return res;
 }
-
-// (Hàm updateGist_() - Dịch sang Node.js - Giữ nguyên logic)
-// ...
 
 /* ------------------ (NODE.JS) HÀM SYNC CHÍNH (FIX LỖI 23505) ------------------- */
 // Đây là hàm được Vercel gọi mỗi 5 phút
@@ -207,16 +203,14 @@ export default async function handler(request, response) {
             console.log(`Đang UPSERT ${dataToSync.length} bản ghi...`);
             const upsertRes = await supabaseFetch(CFG.SUPABASE_TABLE, {
                 method: 'POST',
-                headers: { 'Prefer': 'resolution=merge-duplicates' },
+                headers: { 'Prefer': 'resolution=merge-duplicates' }, // Tự động cập nhật nếu record_id tồn tại
                 body: JSON.stringify(dataToSync)
             });
             if (!upsertRes.ok) {
+                // Lỗi này (23505) sẽ không xảy ra nữa vì chúng ta dùng UPSERT
                 console.error('Lỗi khi UPSERT Supabase:', await upsertRes.text());
             }
         }
-        
-        // 7. (TÙY CHỌN) ĐỒNG BỘ GIST (NẾU BẠN VẪN DÙNG)
-        // ... (Logic gọi generateStaticData() của Gist) ...
 
         console.log('✅ Đồng bộ Vercel hoàn tất.');
         response.status(200).send({ success: true, message: 'Sync complete.' });
