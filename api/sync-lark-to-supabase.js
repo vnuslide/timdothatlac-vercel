@@ -4,43 +4,27 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const LARK_APP_ID = process.env.LARK_APP_ID;
 const LARK_APP_SECRET = process.env.LARK_APP_SECRET;
-const LARK_APP_TOKEN = process.env.LARK_APP_TOKEN; // Bitable app/base token
+const LARK_APP_TOKEN = process.env.LARK_APP_TOKEN;
 const LARK_TABLE_ID = process.env.LARK_TABLE_ID;
 
-// Chuẩn hóa text giống hàm normalizeText trong GAS
+// Chuẩn hoá text giống GAS: bỏ dấu, lower-case, trim
 function normalizeText(input) {
   if (!input) return "";
-  let s = input.toString().toLowerCase();
-  // bỏ dấu tiếng Việt
-  s = s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/g, "d");
-  return s.trim();
+  return input
+    .toString()
+    .normalize("NFD")
+    .replace(/[̀-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
 }
 
-// Lấy phần tử đầu nếu là array, nếu không thì trả về chính nó
-function pickFirst(value) {
-  if (Array.isArray(value)) {
-    return value.length > 0 ? value[0] : "";
-  }
-  return value ?? "";
-}
-
-function formatDateYMD(value) {
-  if (!value) return "";
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return "";
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}/${m}/${day}`;
-}
-
-// === Lấy tenant_access_token từ Lark ===
+// Lấy tenant_access_token của Lark
 async function getLarkToken() {
   const res = await fetch(
     "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal",
     {
       method: "POST",
-      headers: { "Content-Type": "application/json; charset=utf-8" },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         app_id: LARK_APP_ID,
         app_secret: LARK_APP_SECRET,
@@ -48,163 +32,174 @@ async function getLarkToken() {
     }
   );
 
-  const data = await res.json();
-  if (data.code !== 0 || !data.tenant_access_token) {
-    throw new Error("Lark auth error: " + JSON.stringify(data));
+  if (!res.ok) {
+    throw new Error(`Lark auth error: ${res.status} ${await res.text()}`);
   }
+  const data = await res.json();
   return data.tenant_access_token;
 }
 
-// === Lấy tất cả bản ghi TrangThai = "Đã duyệt" từ Lark Bitable ===
-async function fetchApprovedRecordsFromLark(token) {
-  const allItems = [];
-  let pageToken = "";
+// Lấy toàn bộ record từ Lark Bitable
+async function fetchAllLarkRecords(token) {
+  const records = [];
+  let pageToken = undefined;
 
-  do {
-    const params = new URLSearchParams();
-    params.set('filter', 'CurrentValue.[TrangThai] = "Đã duyệt"');
-    params.set("page_size", "500");
-    if (pageToken) params.set("page_token", pageToken);
+  while (true) {
+    const url = new URL(
+      `https://open.larksuite.com/open-apis/bitable/v1/apps/${LARK_APP_TOKEN}/tables/${LARK_TABLE_ID}/records`
+    );
+    url.searchParams.set("page_size", "500");
+    if (pageToken) url.searchParams.set("page_token", pageToken);
 
-    const url = `https://open.larksuite.com/open-apis/bitable/v1/apps/${LARK_APP_TOKEN}/tables/${LARK_TABLE_ID}/records?${params.toString()}`;
-
-    const res = await fetch(url, {
-      method: "GET",
+    const res = await fetch(url.toString(), {
       headers: {
         Authorization: `Bearer ${token}`,
       },
     });
 
-    const data = await res.json();
-    if (data.code !== 0) {
-      throw new Error("Lark fetch error: " + JSON.stringify(data));
+    if (!res.ok) {
+      throw new Error(`Lark fetch error: ${res.status} ${await res.text()}`);
     }
 
-    const items = data.data?.items ?? [];
-    allItems.push(...items);
-    pageToken = data.data?.has_more ? data.data.page_token : "";
-  } while (pageToken);
+    const data = await res.json();
+    if (!data?.data?.items) break;
 
-  return allItems;
-}
-
-function recordToPublicSupabase_(rec) {
-  const f = rec.fields || {};
-  let timeStr = '';
-  if (f.ThoiGian) {
-      try {
-          timeStr = Utilities.formatDate(new Date(f.ThoiGian), CFG.TZ, 'yyyy/MM/dd');
-      } catch(e) { /* Bỏ qua */ }
+    records.push(...data.data.items);
+    pageToken = data.data.page_token;
+    if (!pageToken) break;
   }
 
-  const VN_MAP = {
-    FOUND: ['nhặt được', 'nhat duoc', 'found'],
-    LOST:  ['mất', 'mat', 'lost', 'tìm đồ', 'tim do']
+  return records;
+}
+
+// Map một record Lark sang một row trong bảng TimDoSinhVien (giống GAS)
+function mapRecordToSupabaseRow(record) {
+  const f = record.fields || {};
+
+  // Giống helper bên GAS: bóc multi-select / object -> text thường
+  const unwrapField = (value) => {
+    // Array (multi-select)
+    if (Array.isArray(value)) {
+      const texts = value
+        .map((v) => {
+          if (typeof v === "string") return v;
+          if (v && typeof v === "object") {
+            if (typeof v.text === "string") return v.text;
+            if (typeof v.name === "string") return v.name;
+          }
+          return "";
+        })
+        .filter(Boolean);
+      return texts.join(", ") || "";
+    }
+
+    // Object đơn lẻ
+    if (value && typeof value === "object") {
+      if (typeof value.text === "string") return value.text;
+      if (typeof value.name === "string") return value.name;
+    }
+
+    // String thường
+    return typeof value === "string" ? value : "";
   };
 
-  const typeRaw = (f.LoaiTin || '').toString().toLowerCase();
-  const type = VN_MAP.FOUND.some(x => typeRaw.includes(x)) ? 'found' : 'lost';
+  const recordId = f.record_id || record.record_id || record.id || "";
+  const name = f.Ten || "";
+  const description = f.MoTa || "";
 
-  const name = f.TieuDe || '';
-  const group = (f.Group && f.Group.length > 0) ? f.Group[0] : '';
-  const description = f.MoTa || '';
+  // Ảnh gốc từ Lark (đã là link Drive dạng uc?id=...)
+  const originalImage = (f.HinhAnhURL || "").trim();
 
-  const loaiDoArray = (f.LoaiDo && f.LoaiDo.length > 0) ? f.LoaiDo : [];
-  const docType = loaiDoArray.join(', '); 
-  const khuVuc = f.KhuVuc || '';
+  // Những field bị thành ["Thẻ sinh viên"] bữa giờ
+  const type = unwrapField(f.LoaiDo);
+  const group = unwrapField(f.Group);
+  const docType = unwrapField(f.DocType);
+  const khuVuc = unwrapField(f.KhuVuc);
 
-  // Hàm chuẩn hóa text
-  const normalizeText = (s) => {
-      if (!s) return '';
-      s = String(s).toLowerCase();
-      s = s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd');
-      return s;
-  };
+  const time = f.ThoiGian || "";
+  const timeRaw = f.TimeRaw || null;
+  const isPinned = Boolean(f.Pin || f.isPinned || false);
 
-  // Xử lý ảnh (Không cần ảnh placeholder nữa)
-  const originalImage = f.HinhAnhURL || null;
+  const latitude = f.Lat || f.latitude || null;
+  const longitude = f.Long || f.longitude || null;
+
+  // Field search / slug giống GAS
+  const normalizedName = normalizeText(name);
+  const normalizedGroup = normalizeText(group);
+  const normalizedDocType = normalizeText(docType);
+  const normalizedKhuVuc = normalizeText(khuVuc);
 
   return {
-    record_id: rec.record_id, // Quan trọng: Đây là Primary Key
-    time: timeStr,
-    timeRaw: timeStr ? new Date(timeStr).getTime() : 0,
-    name: name,
-    "group": group, // Phải đặt trong "" vì "group" là từ khóa SQL
-    description: description,
-    docType: docType,
-    // status: "Đã duyệt", // Không cần, vì chúng ta chỉ lấy tin đã duyệt
-    // email: KHÔNG CÓ
-    khuVuc: khuVuc,
-    image: originalImage, 
-    type: type,
-    isPinned: f.Ghim === true,
-    latitude: f.Latitude || null,
-    longitude: f.Longitude || null,
-
-    _name: normalizeText(name),
-    _group: normalizeText(group),
-    _docType: normalizeText(docType),
-    _khuVuc: normalizeText(khuVuc),
+    record_id: recordId,
+    name,
+    description,
+    image: originalImage,
+    type,
+    group,
+    docType,
+    khuVuc,
+    time,
+    timeRaw: timeRaw || null,
+    isPinned,
+    latitude,
+    longitude,
+    _name: normalizedName,
+    _group: normalizedGroup,
+    _docType: normalizedDocType,
+    _khuVuc: normalizedKhuVuc,
   };
 }
+
 export default async function handler(req, res) {
+  if (req.method !== "GET") {
+    return res.status(405).json({ success: false, error: "Method not allowed" });
+  }
+
   try {
     if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
-      return res
-        .status(500)
-        .json({ success: false, error: "Supabase env missing" });
-    }
-    if (!LARK_APP_ID || !LARK_APP_SECRET || !LARK_APP_TOKEN || !LARK_TABLE_ID) {
-      return res
-        .status(500)
-        .json({ success: false, error: "Lark env missing" });
+      throw new Error("supabaseUrl/supabaseKey is required.");
     }
 
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
-    // 1. Lấy token Lark và tất cả records đã duyệt
-    const token = await getLarkToken();
-    const items = await fetchApprovedRecordsFromLark(token);
-
-    // 2. Map dữ liệu giống hệt GAS
-    const rows = items.map(recordToPublicSupabase);
-    const larkIdSet = new Set(rows.map((r) => r.record_id));
-
-    // 3. Lấy danh sách record_id hiện có trong Supabase (bảng TimDoSinhVien)
-    const { data: existing, error: existingError } = await supabase
+    // 1. Lấy toàn bộ record hiện có trong Supabase
+    const { data: existingRows, error: existingError } = await supabase
       .from("TimDoSinhVien")
       .select("record_id");
+    if (existingError) throw existingError;
 
-    if (existingError) {
-      throw existingError;
+    const existingIds = new Set(existingRows.map((r) => r.record_id));
+
+    // 2. Lấy dữ liệu từ Lark
+    const token = await getLarkToken();
+    const larkRecords = await fetchAllLarkRecords(token);
+
+    const rows = [];
+    const larkIds = new Set();
+
+    for (const rec of larkRecords) {
+      const row = mapRecordToSupabaseRow(rec);
+      if (!row.record_id) continue;
+      larkIds.add(row.record_id);
+      rows.push(row);
     }
 
-    const idsToDelete =
-      existing
-        ?.filter((row) => row.record_id && !larkIdSet.has(row.record_id))
-        .map((row) => row.record_id) ?? [];
+    // 3. Xoá các record Supabase không còn trong Lark
+    const idsToDelete = Array.from(existingIds).filter((id) => !larkIds.has(id));
 
-    // 4. Xoá bản ghi thừa (đã xoá khỏi Lark)
     if (idsToDelete.length > 0) {
       await supabase.from("TimDoSinhVien").delete().in("record_id", idsToDelete);
     }
 
-    // 5. Upsert toàn bộ data từ Lark
+    // 4. Upsert dữ liệu mới
     if (rows.length > 0) {
-      const { error: upsertError } = await supabase
-        .from("TimDoSinhVien")
-        .upsert(rows, { onConflict: "record_id" });
-
-      if (upsertError) {
-        throw upsertError;
-      }
+      await supabase.from("TimDoSinhVien").upsert(rows, { onConflict: "record_id" });
     }
 
     return res
       .status(200)
       .json({ success: true, synced: rows.length, deleted: idsToDelete.length });
   } catch (err) {
-    console.error("sync-lark-to-supabase error:", err);
     return res.status(500).json({ success: false, error: String(err) });
   }
 }
