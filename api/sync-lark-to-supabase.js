@@ -1,30 +1,39 @@
 // api/sync-lark-to-supabase.js
-// Đồng bộ Lark Bitable -> Supabase, có chuẩn hoá dữ liệu giống Apps Script cũ
+// Đồng bộ Lark Bitable -> Supabase, có chuẩn hoá dữ liệu
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
-// Lark
-// LARK_APP_ID / LARK_APP_SECRET: dùng để lấy tenant_access_token
-// LARK_BASE_TOKEN: nếu bạn đã tự lấy được tenant_access_token thì có thể
-//    set luôn biến này và bỏ qua bước auth.
-// LARK_BASE_TOKEN ở đây chính là app_token của Bitable (database)
-// LARK_TABLE_ID: id bảng trong Bitable
 const LARK_APP_ID = process.env.LARK_APP_ID;
 const LARK_APP_SECRET = process.env.LARK_APP_SECRET;
-const LARK_BASE_TOKEN = process.env.LARK_BASE_TOKEN; // app_token / base token
+const LARK_BASE_TOKEN = process.env.LARK_BASE_TOKEN;
 const LARK_TABLE_ID = process.env.LARK_TABLE_ID;
 
 /* -------------------------------------------------------------------------- */
-/*  Helpers chuẩn hoá dữ liệu – giống các hàm trong Apps Script cũ           */
+/*  Helpers chuẩn hoá dữ liệu - ĐÃ SỬA                                       */
 /* -------------------------------------------------------------------------- */
 
 function firstOrNull(value) {
+  // Nếu là mảng, lấy phần tử đầu
   if (Array.isArray(value)) {
-    return value.length ? value[0] : null;
+    if (value.length === 0) return null;
+    const first = value[0];
+    
+    // Nếu phần tử đầu là object có thuộc tính text (Lark select/multi-select)
+    if (first && typeof first === 'object' && first.text) {
+      return first.text;
+    }
+    
+    return first;
   }
-  if (value === undefined || value === "") return null;
-  return value ?? null;
+  
+  // Nếu là object có thuộc tính text
+  if (value && typeof value === 'object' && value.text) {
+    return value.text;
+  }
+  
+  if (value === undefined || value === "" || value === null) return null;
+  return value;
 }
 
 function normalizeText(value) {
@@ -33,23 +42,69 @@ function normalizeText(value) {
   return String(v).trim().replace(/\s+/g, " ");
 }
 
+// Lấy URL ảnh từ Lark attachment field
+function extractImageUrl(imageField) {
+  if (!imageField) return null;
+  
+  // Nếu là string trực tiếp
+  if (typeof imageField === 'string') {
+    return imageField.trim() || null;
+  }
+  
+  // Nếu là mảng
+  if (Array.isArray(imageField)) {
+    if (imageField.length === 0) return null;
+    
+    const first = imageField[0];
+    
+    // Nếu là string
+    if (typeof first === 'string') {
+      return first.trim() || null;
+    }
+    
+    // Nếu là object có thuộc tính url hoặc tmp_url
+    if (first && typeof first === 'object') {
+      return first.url || first.tmp_url || first.link || null;
+    }
+  }
+  
+  // Nếu là object
+  if (typeof imageField === 'object') {
+    return imageField.url || imageField.tmp_url || imageField.link || null;
+  }
+  
+  return null;
+}
+
 function formatTimeFromRaw(timeRaw, fallback) {
-  if (typeof timeRaw === "number" && !Number.isNaN(timeRaw)) {
+  // Ưu tiên dùng timeRaw (timestamp)
+  if (typeof timeRaw === "number" && !Number.isNaN(timeRaw) && timeRaw > 0) {
     const d = new Date(timeRaw);
     const y = d.getFullYear();
     const m = String(d.getMonth() + 1).padStart(2, "0");
     const day = String(d.getDate()).padStart(2, "0");
-    // Apps Script format kiểu yyyy/MM/dd
     return `${y}/${m}/${day}`;
   }
-  return fallback || null;
+  
+  // Nếu fallback là string date hợp lệ
+  if (fallback) {
+    const fb = firstOrNull(fallback);
+    if (fb && typeof fb === 'string') {
+      const parsed = new Date(fb);
+      if (!isNaN(parsed.getTime())) {
+        const y = parsed.getFullYear();
+        const m = String(parsed.getMonth() + 1).padStart(2, "0");
+        const day = String(parsed.getDate()).padStart(2, "0");
+        return `${y}/${m}/${day}`;
+      }
+    }
+  }
+  
+  return null;
 }
 
 /**
- * Map một ghi Lark -> 1 row trong Supabase (public_posts)
- *  - Bóc phần tử đầu của các field dạng mảng (Group, LoaiDo, KhuVuc,…)
- *  - Chuẩn hoá text
- *  - timeRaw: số timestamp; time: chuỗi yyyy/MM/dd
+ * Map một record Lark -> 1 row trong Supabase (public_posts)
  */
 function mapRecordToSupabaseRow(larkRecord) {
   const f = larkRecord.fields || {};
@@ -60,38 +115,44 @@ function mapRecordToSupabaseRow(larkRecord) {
   // Mô tả
   const description = normalizeText(f.MoTa || f.description);
 
-  // Ảnh: dùng HinhAnhURL trong Lark
-  const image = firstOrNull(f.HinhAnhURL || f.image) || null;
+  // Ảnh - ĐÃ SỬA: dùng hàm extractImageUrl
+  const image = extractImageUrl(f.HinhAnhURL || f.HinhAnh || f.image);
 
-  // Trạng thái: "Cần tìm" / "Nhặt được" → cột type
+  // Trạng thái
   const type = normalizeText(f.TrangThai || f.type) || "found";
 
-  // Các lựa chọn (select / multi-select) – Lark trả mảng → bóc phần tử đầu
+  // Các select field - ĐÃ SỬA: firstOrNull giờ tự động lấy .text
   const group = normalizeText(f.Group);
   const docType = normalizeText(f.LoaiDo);
   const khuVuc = normalizeText(f.KhuVuc);
 
-  // Thời gian
-  const timeRaw =
-    typeof f.ThoiGianRaw === "number"
-      ? f.ThoiGianRaw
-      : Number(f.timeRaw) || null;
-  const time = formatTimeFromRaw(timeRaw, firstOrNull(f.ThoiGian || f.time));
+  // Thời gian - ĐÃ SỬA
+  let timeRaw = null;
+  if (typeof f.ThoiGianRaw === "number") {
+    timeRaw = f.ThoiGianRaw;
+  } else if (typeof f.timeRaw === "number") {
+    timeRaw = f.timeRaw;
+  } else if (typeof f.ThoiGian === "number") {
+    timeRaw = f.ThoiGian;
+  } else if (typeof f.time === "number") {
+    timeRaw = f.time;
+  }
+  
+  const time = formatTimeFromRaw(timeRaw, f.ThoiGian || f.time);
 
   // Ghim bài
   const isPinned = !!(f.Ghim || f.isPinned);
 
   // Toạ độ
   const latitude =
-    typeof f.Latitude === "number" ? f.Latitude : Number(f.latitude) || null;
+    typeof f.Latitude === "number" ? f.Latitude : 
+    typeof f.latitude === "number" ? f.latitude : null;
   const longitude =
-    typeof f.Longitude === "number" ? f.Longitude : Number(f.longitude) || null;
+    typeof f.Longitude === "number" ? f.Longitude : 
+    typeof f.longitude === "number" ? f.longitude : null;
 
   return {
-    // Khóa chính
     record_id: larkRecord.record_id,
-
-    // Các cột chính của bảng public_posts
     name,
     description,
     image,
@@ -104,8 +165,6 @@ function mapRecordToSupabaseRow(larkRecord) {
     isPinned,
     latitude,
     longitude,
-
-    // Các cột “raw” để phục vụ search / backup
     _name: name,
     _group: group,
     _docType: docType,
@@ -118,8 +177,6 @@ function mapRecordToSupabaseRow(larkRecord) {
 /* -------------------------------------------------------------------------- */
 
 async function getTenantAccessToken() {
-  // Nếu bạn đã tự set sẵn tenant_access_token vào LARK_BASE_TOKEN
-  // thì dùng luôn, khỏi gọi auth.
   if (LARK_BASE_TOKEN && !LARK_APP_ID && !LARK_APP_SECRET) {
     return LARK_BASE_TOKEN;
   }
@@ -218,12 +275,12 @@ async function fetchAllLarkRecords() {
 /* -------------------------------------------------------------------------- */
 
 function supabaseHeaders() {
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_KEY");
   }
   return {
-    apikey: SUPABASE_SERVICE_ROLE_KEY,
-    Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+    apikey: SUPABASE_SERVICE_KEY,
+    Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
     "Content-Type": "application/json",
   };
 }
@@ -270,7 +327,6 @@ async function upsertRows(rows) {
 async function deleteMissingRows(missingIds) {
   if (!missingIds.length) return;
 
-  // record_id=in.(id1,id2,...)
   const idList = missingIds.map((id) => `"${id}"`).join(",");
   const url = `${SUPABASE_URL}/rest/v1/public_posts?record_id=in.(${encodeURIComponent(
     idList
@@ -300,18 +356,16 @@ export default async function handler(req, res) {
   }
 
   try {
-    // 1. Lấy toàn bộ record từ Lark
     const larkRecords = await fetchAllLarkRecords();
-
-    // 2. Map sang cấu trúc Supabase & chuẩn hoá
     const supabaseRows = larkRecords.map(mapRecordToSupabaseRow);
+    
+    // Log để debug
+    console.log("Sample mapped row:", JSON.stringify(supabaseRows[0], null, 2));
 
-    // 3. Fetch list record_id đang có ở Supabase
     const existingIds = await fetchExistingRecordIds();
     const currentIds = new Set(larkRecords.map((r) => r.record_id));
     const missingIds = existingIds.filter((id) => !currentIds.has(id));
 
-    // 4. Upsert & delete
     await upsertRows(supabaseRows);
     await deleteMissingRows(missingIds);
 
