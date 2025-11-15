@@ -100,49 +100,49 @@ function recordToPublicSupabase(rec) {
   const timeRaw = timeStr ? new Date(timeStr).getTime() : 0;
 
   // type: found / lost
-const VN_MAP = {
-    FOUND: ['nhặt được', 'nhat duoc', 'found'],
-    LOST:  ['mất', 'mat', 'lost', 'tìm đồ', 'tim do']
+  const VN_MAP = {
+    FOUND: ["nhặt được", "nhat duoc", "found"],
+    LOST: ["mất", "mat", "lost", "tìm đồ", "tim do"],
   };
+  const typeRaw = (f.LoaiTin || "").toString().toLowerCase();
+  const isFound = VN_MAP.FOUND.some((x) => typeRaw.includes(x));
+  const type = isFound ? "found" : "lost";
 
-  const typeRaw = (f.LoaiTin || '').toString().toLowerCase();
-  const type = VN_MAP.FOUND.some(x => typeRaw.includes(x)) ? 'found' : 'lost';
+  const name = f.TieuDe || "";
+  const group = pickFirst(f.Group); // Group là array → lấy phần tử đầu
+  const description = f.MoTa || "";
 
-  const name = f.TieuDe || '';
-  const group = (f.Group && f.Group.length > 0) ? f.Group[0] : '';
-  const description = f.MoTa || '';
+  const loaiDoArray = Array.isArray(f.LoaiDo) ? f.LoaiDo : [];
+  const docType = loaiDoArray.join(", ");
 
-  const loaiDoArray = (f.LoaiDo && f.LoaiDo.length > 0) ? f.LoaiDo : [];
-  const docType = loaiDoArray.join(', '); 
-  const khuVuc = f.KhuVuc || '';
+  const khuVuc = f.KhuVuc || "";
 
-  // Hàm chuẩn hóa text
-  const normalizeText = (s) => {
-      if (!s) return '';
-      s = String(s).toLowerCase();
-      s = s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd');
-      return s;
-  };
-
-  // Xử lý ảnh (Không cần ảnh placeholder nữa)
   const originalImage = f.HinhAnhURL || null;
-  return {
-    record_id: rec.record_id, // Quan trọng: Đây là Primary Key
-    time: timeStr,
-    timeRaw: timeStr ? new Date(timeStr).getTime() : 0,
-    name: name,
-    "group": group, // Phải đặt trong "" vì "group" là từ khóa SQL
-    description: description,
-    docType: docType,
-    // status: "Đã duyệt", // Không cần, vì chúng ta chỉ lấy tin đã duyệt
-    // email: KHÔNG CÓ
-    khuVuc: khuVuc,
-    image: originalImage, 
-    type: type,
-    isPinned: f.Ghim === true,
-    latitude: f.Latitude || null,
-    longitude: f.Longitude || null,
 
+  // Tọa độ
+  const lat =
+    f.Latitude !== undefined && f.Latitude !== null && f.Latitude !== ""
+      ? Number(f.Latitude)
+      : null;
+  const lng =
+    f.Longitude !== undefined && f.Longitude !== null && f.Longitude !== ""
+      ? Number(f.Longitude)
+      : null;
+
+  return {
+    record_id: rec.record_id,
+    time: timeStr,
+    timeRaw,
+    name,
+    group, // map thẳng sang cột "group" trong Supabase
+    description,
+    docType,
+    khuVuc,
+    image: originalImage,
+    type,
+    isPinned: f.Ghim === true,
+    latitude: Number.isNaN(lat) ? null : lat,
+    longitude: Number.isNaN(lng) ? null : lng,
     _name: normalizeText(name),
     _group: normalizeText(group),
     _docType: normalizeText(docType),
