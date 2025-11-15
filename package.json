@@ -1,0 +1,11 @@
+{
+  "name": "timdo-vercel",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node api/sync-lark-to-supabase.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.48.0"
+  }
+}
