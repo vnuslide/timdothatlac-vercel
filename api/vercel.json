@@ -1,8 +1,0 @@
-{
-  "crons": [
-    {
-      "path": "/api/sync-lark-to-supabase",
-      "schedule": "*/1 * * * *"
-    }
-  ]
-}
